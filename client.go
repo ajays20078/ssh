@@ -24,6 +24,7 @@ import (
 	"io/ioutil"
 	"os"
 	"strings"
+	"bufio"
 
 	"github.com/docker/docker/pkg/term"
 	"github.com/docker/machine/libmachine/log"
@@ -41,6 +42,8 @@ type Client interface {
 	// exec them on the server.
 	Shell(args ...string) error
 
+	// Same as Shell with input pipe
+	ShellWithInput(inputCopy io.Writer, args ...string) (error)
 	// Start starts the specified command without waiting for it to finish. You
 	// have to call the Wait function for that.
 	//
@@ -282,6 +285,76 @@ func (client *NativeClient) Shell(args ...string) error {
 
 	return nil
 }
+
+
+func (client *NativeClient) ShellWithInput(inputCopy io.Writer, args ...string) error {
+	var (
+		termWidth, termHeight = 80, 24
+	)
+	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", client.Hostname, client.Port), &client.Config)
+	if err != nil {
+		return err
+	}
+
+	session, err := conn.NewSession()
+	if err != nil {
+		return err
+	}
+
+	defer session.Close()
+	inReader, inWriter := io.Pipe()
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
+	session.Stdin = inReader
+
+	modes := ssh.TerminalModes{
+		ssh.ECHO: 1,
+	}
+
+	fd := os.Stdin.Fd()
+
+	if term.IsTerminal(fd) {
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			return err
+		}
+
+		defer term.RestoreTerminal(fd, oldState)
+
+		winsize, err := term.GetWinsize(fd)
+		if err == nil {
+			termWidth = int(winsize.Width)
+			termHeight = int(winsize.Height)
+		}
+	}
+
+	if err := session.RequestPty("xterm", termHeight, termWidth, modes); err != nil {
+		return err
+	}
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		for {	
+			b, _ := reader.ReadByte()
+			inWriter.Write([]byte{b})
+			inputCopy.Write([]byte{b})
+		}
+	}()
+	if len(args) == 0 {
+		if err := session.Shell(); err != nil {
+			return err
+		}
+
+		// monitor for sigwinch
+		go monWinCh(session, os.Stdout.Fd())
+
+		session.Wait()
+	} else {
+		session.Run(strings.Join(args, " "))
+	}
+
+	return nil
+}
+
 
 // termSize gets the current window size and returns it in a window-change friendly
 // format.
