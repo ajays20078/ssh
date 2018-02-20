@@ -349,6 +349,8 @@ func (client *NativeClient) ShellWithInput(inputCopy io.Writer, args ...string) 
 
 		session.Wait()
 	} else {
+		// monitor for sigwinch
+		go monWinCh(session, os.Stdout.Fd())
 		session.Run(strings.Join(args, " "))
 	}
 
